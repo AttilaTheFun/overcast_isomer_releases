@@ -1,0 +1,220 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overcast</title>
+  <link rel="icon" type="image/png" href="./assets/Overcast-1024.png">
+  <link rel="apple-touch-icon" href="./assets/Overcast-1024.png">
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin: 0; height: 100%; background: light-dark(#fff, rgb(18, 18, 20)); }
+    #canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    #error { font: 14px monospace; color: #b00; padding: 16px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <!-- React 18 UMD globals for the ReactRenderer (?renderer=react). -->
+  <script src="./runtime/react.production.min.js?v=2464211506"></script>
+  <script src="./runtime/react-dom.production.min.js?v=2464211506"></script>
+  <script type="module">
+    import { boot } from "./runtime/boot.js?v=2464211506";
+    import { Dependencies } from "./app_bridge.js?v=2464211506";
+
+    // Host-side dependency injection: the app's HTTPService. Cloud provider
+    // APIs don't send CORS headers, so requests route through the dev
+    // server's /proxy endpoint (a dumb pass-through; all signing and auth
+    // headers are produced by the Swift app).
+    let bridge = null;
+    const encoder = new TextEncoder(), decoder = new TextDecoder();
+    // Is this page served by Overcast's own dev server (which has /proxy and
+    // /secure)? Asked once, before boot. On any other host (a static copy on
+    // GitHub Pages, say) nothing is ever sent to the page's origin: a request
+    // to "/proxy" there would hand the provider credentials in it to that
+    // host. Such a copy runs the demo data only.
+    const hasBridge = await fetch("/bridge", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => !!(j && j.overcast_bridge === 1))
+      .catch(() => false);
+    if (!hasBridge) {
+      const note = document.createElement("div");
+      note.id = "hosted-note";
+      note.textContent = "Demo copy: this page cannot reach cloud providers. Enter \u201Cdemo\u201D as any key to see sample data; run Overcast locally or use the Mac app for real accounts. (Tap to dismiss.)";
+      note.addEventListener("click", () => note.remove());
+      note.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:10;padding:8px 14px;font:12px -apple-system,system-ui,sans-serif;text-align:center;color:light-dark(#333,#ddd);background:light-dark(rgba(245,245,247,.94),rgba(36,36,40,.94));border-top:1px solid light-dark(#ddd,#444);cursor:pointer;";
+      document.body.appendChild(note);
+    }
+    const secure = (op, key, value) => !hasBridge ? Promise.resolve({ found: false }) : fetch("/secure", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op, key, value }),
+    }).then((r) => r.json());
+    // Overcast's page implements isomer's NetworkService / KeychainService
+    // itself: requests route through the dev server's /proxy (cloud provider
+    // APIs send no CORS headers) and secrets through its /secure Keychain
+    // bridge (so the browser holds no tokens at rest). Reply framing is the
+    // framework's: "<status>\n<header lines>\n\n<body>".
+    const performViaProxy = async (url, method, headers, body) => {
+      if (!hasBridge) throw new Error("no proxy on this host: demo data only");
+      const h = {};
+      for (const line of String(headers || "").split("\n")) {
+        const i = line.indexOf(":");
+        if (i > 0) h[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+      }
+      const response = await fetch("/proxy", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: method || "GET", url, headers: h, body: body && body.length ? decoder.decode(body) : "" }),
+      });
+      const { status, body: text } = await response.json();
+      if (!status) throw new Error("transport failure");
+      const head = encoder.encode(status + "\n\n\n");
+      const bytes = encoder.encode(text || "");
+      const out = new Uint8Array(head.length + bytes.length);
+      out.set(head, 0); out.set(bytes, head.length);
+      return out;
+    };
+    const dependencies = {
+      networking: Dependencies.networkService(() => ({
+        async request(url, method) {
+          const raw = await performViaProxy(url, method, "", null);
+          const text = decoder.decode(raw); const status = parseInt(text, 10);
+          if (status < 200 || status >= 300) throw new Error("HTTP " + status);
+          return raw.subarray(text.indexOf("\n\n") + 2);
+        },
+        async send(url, method, headers, body) {
+          const raw = await performViaProxy(url, method, headers, body);
+          const text = decoder.decode(raw); const status = parseInt(text, 10);
+          if (status < 200 || status >= 300) throw new Error("HTTP " + status);
+          return raw.subarray(text.indexOf("\n\n") + 2);
+        },
+        perform: performViaProxy,
+      })),
+      keychain: Dependencies.keychainService(() => ({
+        async get(key) {
+          const { found, value } = await secure("get", key);
+          if (!found) throw new Error("no keychain value for " + key);
+          return encoder.encode(value || "");
+        },
+        async set(value, key) { await secure("set", key, decoder.decode(value)); },
+        async delete(key) { await secure("delete", key); },
+      })),
+      timer: Dependencies.timerService(() => ({
+        delay(milliseconds) { return new Promise((resolve) => setTimeout(resolve, Math.max(0, milliseconds))); },
+      })),
+      // OAuth through a popup; /oauth/callback posts { oauthRedirect } back.
+      oauth: Dependencies.oAuthService(() => ({
+        async redirectURI() { return location.origin + "/oauth/callback"; },
+        authorize(url) {
+          return new Promise((resolve, reject) => {
+            if (!hasBridge) { reject(new Error("sign-in needs the local Overcast server")); return; }
+            const popup = window.open(url, "overcast-oauth", "width=520,height=680");
+            if (!popup) { reject(new Error("popup blocked")); return; }
+            const finish = (query) => {
+              window.removeEventListener("message", onMessage); clearInterval(poll);
+              try { popup.close(); } catch (_) {}
+              resolve(query.replace(/^\?/, ""));
+            };
+            const onMessage = (event) => {
+              if (event.origin === location.origin && event.data && typeof event.data.oauthRedirect === "string") finish(event.data.oauthRedirect);
+            };
+            window.addEventListener("message", onMessage);
+            const poll = setInterval(() => {
+              if (popup.closed) { window.removeEventListener("message", onMessage); clearInterval(poll); reject(new Error("sign-in window closed")); }
+            }, 500);
+          });
+        },
+      })),
+    };
+
+    // Dev hooks for headless smoke tests: seed FileService-backed
+    // localStorage before the app boots.
+    //   ?seedcreds=<URI-encoded JSON>       (the overcast_credentials.json body)
+    //   ?seedfile=<name>:<URI-encoded body> (any FileService file, e.g. a cache entry)
+    {
+      const params = new URLSearchParams(location.search);
+      const seed = params.get("seedcreds");
+      if (seed) {
+        try { localStorage.setItem("overcast_credentials.json", seed); }
+        catch (err) { console.warn("[seedcreds]", err); }
+      }
+      const file = params.get("seedfile");
+      if (file) {
+        const mark = file.indexOf(":");
+        try { localStorage.setItem(file.slice(0, mark), file.slice(mark + 1)); }
+        catch (err) { console.warn("[seedfile]", err); }
+      }
+    }
+
+    boot({
+      canvas: document.getElementById("canvas"),
+      wasmURL: "./app.wasm?v=2464211506",
+      rendererName: new URLSearchParams(location.search).get("renderer") || "react",
+      dependencies,
+    }).then((result) => {
+      bridge = result.bridge;
+      // Dev hooks for headless-browser smoke tests (same contract as the
+      // isomer examples):
+      //   ?devlog             mirror console warnings/errors into #devlog
+      //   ?open=AWS,Connect   tap [data-tap] elements by contained text
+      //   ?type=hello         type into the focused TextField overlay
+      const params = new URLSearchParams(location.search);
+      if (params.has("devlog")) {
+        const sink = document.createElement("pre");
+        sink.id = "devlog";
+        sink.style.display = "none";
+        document.body.appendChild(sink);
+        const mirror = (tag, original) => (...args) => {
+          sink.textContent += `[${tag}] ${args.map(String).join(" ")}\n`;
+          original(...args);
+        };
+        console.warn = mirror("warn", console.warn.bind(console));
+        console.error = mirror("error", console.error.bind(console));
+        window.addEventListener("error", (e) => mirror("uncaught", () => {})(e.message));
+        window.addEventListener("unhandledrejection", (e) => mirror("rejection", () => {})(e.reason));
+      }
+      const open = params.get("open");
+      if (open) {
+        const labels = open.split(",");
+        const openNext = (index) => {
+          if (index >= labels.length) return;
+          let tries = 0;
+          const attempt = () => {
+            const el = [...document.querySelectorAll("[data-tap], button, [role=button]")]
+              .filter((e) => e.textContent.includes(labels[index])
+                || (e.getAttribute("aria-label") || "").includes(labels[index]))
+              .sort((a, b) => a.textContent.length - b.textContent.length)[0];
+            if (el) {
+              el.click();
+              setTimeout(() => openNext(index + 1), 1200);
+            } else if (++tries < 20) {
+              setTimeout(attempt, 250);
+            }
+          };
+          attempt();
+        };
+        setTimeout(() => openNext(0), 250);
+        // Headless throttles requestAnimationFrame — pump frames so async
+        // completions re-render before the screenshot.
+        const pump = setInterval(() => bridge.uuiRender(), 400);
+        setTimeout(() => clearInterval(pump), 45000);
+      }
+      const type = params.get("type");
+      if (type) {
+        setTimeout(() => {
+          const overlay = window.__uuiTextOverlay;
+          if (overlay && overlay.style.display !== "none") {
+            overlay.value = type;
+            overlay.dispatchEvent(new Event("input"));
+          }
+        }, 2500);
+      }
+    }).catch((error) => {
+      console.error(error);
+      const pre = document.createElement("pre");
+      pre.id = "error";
+      pre.textContent = String(error.stack || error);
+      document.body.replaceChildren(pre);
+    });
+  </script>
+</body>
+</html>
