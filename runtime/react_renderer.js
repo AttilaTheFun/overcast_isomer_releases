@@ -12,13 +12,37 @@
 // Uses the React 18 UMD globals (window.React / window.ReactDOM), served
 // from the hermetic @react_umd repositories next to this bundle.
 
-import { resolveImageSource } from "./raster.js?v=1918639564";
-import { SYMBOLS } from "./symbols.js?v=1918639564";
-import { storeFiles } from "./imported_files.js?v=1918639564";
+import { resolveImageSource } from "./raster.js?v=3267170657";
+import { SYMBOLS } from "./symbols.js?v=3267170657";
+import { storeFiles } from "./imported_files.js?v=3267170657";
 
 /// An SF Symbol drawn from the portable table as an inline SVG sized to
 /// the text it stands in (an `Image(systemName:)` is a text node carrying
 /// `params.symbol`); unknown names keep the guest's fallback glyph.
+/** A shape node's `path` param (Shapes.swift: `M x y`, `L x y`, `Z`,
+ *  `R x y w h`, `Q x y w h r`, `E x y w h`, in the unit square) as SVG
+ *  path data. A rounded rect's corners and an ellipse are arcs. */
+function svgPathData(text) {
+  const t = text.split(" ");
+  const out = [];
+  for (let i = 0; i < t.length;) {
+    const op = t[i++];
+    const n = () => Number(t[i++]);
+    if (op === "M") out.push(`M ${n()} ${n()}`);
+    else if (op === "L") out.push(`L ${n()} ${n()}`);
+    else if (op === "Z") out.push("Z");
+    else if (op === "R") { const x = n(), y = n(), w = n(), h = n(); out.push(`M ${x} ${y} h ${w} v ${h} h ${-w} Z`); }
+    else if (op === "Q") {
+      const x = n(), y = n(), w = n(), h = n(), r = Math.min(n(), w / 2, h / 2);
+      out.push(`M ${x + r} ${y} h ${w - 2 * r} a ${r} ${r} 0 0 1 ${r} ${r} v ${h - 2 * r} a ${r} ${r} 0 0 1 ${-r} ${r} h ${-(w - 2 * r)} a ${r} ${r} 0 0 1 ${-r} ${-r} v ${-(h - 2 * r)} a ${r} ${r} 0 0 1 ${r} ${-r} Z`);
+    } else if (op === "E") {
+      const x = n(), y = n(), w = n(), h = n(), rx = w / 2, ry = h / 2;
+      out.push(`M ${x} ${y + ry} a ${rx} ${ry} 0 1 0 ${w} 0 a ${rx} ${ry} 0 1 0 ${-w} 0 Z`);
+    } else break;
+  }
+  return out.join(" ");
+}
+
 function symbolSVG(h, name, size, color, weight, extraStyle, secondary) {
   const entry = SYMBOLS[name];
   if (!entry) return null;
@@ -1071,6 +1095,9 @@ export function createReactTreeRenderer({ container, sendEvent, sendKey = (id, v
         key: `content:${depth}`, // remount per level: a push swaps the screen
         style: {
           display: "flex", flexDirection: "column", flex: 1, minHeight: 0, alignSelf: "stretch",
+          // Nothing pins over the content here: its edge scroll takes no
+          // top inset (an enclosing bar's must not reach it).
+          "--uui-inset-top": "0px",
           ...(rows.length > 1 ? { "--uui-safe-top": "0px" } : {}),
         },
       }, kids));
@@ -2577,12 +2604,21 @@ export function createReactTreeRenderer({ container, sendEvent, sendKey = (id, v
       };
       pendingTabPill = tabPill;
     }
-    // Pinned chrome (a bar-only navstack, a safe-area inset stack): find the
+    // A screen's chrome (a navstack, a safe-area inset stack): find the
     // content's edge scroll before the children render, so the scroll takes
-    // the chrome's insets as padding and flows beneath it.
+    // the chrome's insets as padding and flows beneath it — and, on a
+    // document-scrolled page, is the page's scroll. Every navstack claims
+    // it, not only one whose bar pins over the content: under a large title
+    // the scroll takes no top inset, but it is still the screen's scroll
+    // (unclaimed, it was a bounded scroll inside the page's content-sized
+    // chain, and a Form under a large title came out with no height at all
+    // on a phone-width page).
     let ownsEdgeScroll = false;
-    if (n.k === "hostView" && n.view === "navstack" && navStackBarOnly(n) && (n.ch || []).length === 1) {
-      const target = edgeScroll(n.ch[0]);
+    const navContent = n.k === "hostView" && n.view === "navstack"
+      ? ((n.ch || []).length === 1 || ((n.params || {}).principalContent === "1" && (n.ch || []).length === 2) ? n.ch[0] : null)
+      : null;
+    if (navContent) {
+      const target = edgeScroll(navContent);
       if (target) { edgeScrolls.add(target); ownsEdgeScroll = true; }
     } else if (n.k === "stack" && (n.params || {}).inset && (n.ch || []).length === 2) {
       const target = edgeScroll(n.ch[(n.params || {}).inset === "top" ? 1 : 0]);
@@ -2790,6 +2826,11 @@ export function createReactTreeRenderer({ container, sendEvent, sendKey = (id, v
           s.minWidth = 0;
           s.overflowY = "auto";
         }
+        // `.scrollDisabled(true)`: laid out the same, not scrollable.
+        const scrollDisabled = (n.params || {}).scrollDisabled === "1";
+        if (scrollDisabled) {
+          if (n.axis === "h") s.overflowX = "hidden"; else s.overflowY = "hidden";
+        }
         // The screen's edge scroll on a document-scrolled page: its content
         // runs on past it into the page, and the page scrolls.
         const documentScrolled = edgeScrolls.has(n) && docScroll();
@@ -2928,6 +2969,25 @@ export function createReactTreeRenderer({ container, sendEvent, sendKey = (id, v
             // SVG starts at 3 o'clock, as SwiftUI's trim does.
             transform: `rotate(${360 * (from || 0)} ${size / 2} ${size / 2})`,
           }));
+        }
+        // An app's own shape: its path in the unit square (the `path`
+        // param: M/L/Z/R/Q/E), drawn as SVG stretched to the box.
+        const custom = (n.params || {}).path;
+        if (custom) {
+          if (n.width == null && !n.expandW && !(sizedByFrame && sizedByFrame.w)) s.minWidth = 10;
+          if (n.height == null && !n.expandH && !(sizedByFrame && sizedByFrame.h)) s.minHeight = 10;
+          s.position = s.position || "relative";
+          const width = n.strokeWidth || 1;
+          return h("div", props,
+            h("svg", {
+              key: "path", viewBox: "0 0 1 1", preserveAspectRatio: "none",
+              style: { position: "absolute", left: 0, top: 0, width: "100%", height: "100%", display: "block", overflow: "visible", pointerEvents: "none" },
+            }, h("path", {
+              d: svgPathData(custom),
+              fill: n.fill ? rgba(n.fill) : "none",
+              stroke: n.stroke ? rgba(n.stroke) : "none", strokeWidth: width, vectorEffect: "non-scaling-stroke",
+            })),
+            ...kids);
         }
         if (n.shape === "circle") s.borderRadius = "50%";
         if (n.shape === "capsule") s.borderRadius = 9999;
