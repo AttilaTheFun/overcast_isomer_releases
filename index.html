@@ -16,11 +16,11 @@
 <body>
   <canvas id="canvas"></canvas>
   <!-- React 18 UMD globals for the ReactRenderer (?renderer=react). -->
-  <script src="./runtime/react.production.min.js?v=702497478"></script>
-  <script src="./runtime/react-dom.production.min.js?v=702497478"></script>
+  <script src="./runtime/react.production.min.js?v=1388700582"></script>
+  <script src="./runtime/react-dom.production.min.js?v=1388700582"></script>
   <script type="module">
-    import { boot } from "./runtime/boot.js?v=702497478";
-    import { Dependencies } from "./app_bridge.js?v=702497478";
+    import { boot } from "./runtime/boot.js?v=1388700582";
+    import { Dependencies } from "./app_bridge.js?v=1388700582";
 
     // Host-side dependency injection: the app's HTTPService. Cloud provider
     // APIs don't send CORS headers, so requests route through the dev
@@ -49,46 +49,27 @@
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ op, key, value }),
     }).then((r) => r.json());
-    // Overcast's page implements isomer's NetworkService / KeychainService
-    // itself: requests route through the dev server's /proxy (cloud provider
-    // APIs send no CORS headers) and secrets through its /secure Keychain
-    // bridge (so the browser holds no tokens at rest). Reply framing is the
-    // framework's: "<status>\n<header lines>\n\n<body>".
-    const performViaProxy = async (url, method, headers, body) => {
-      if (!hasBridge) throw new Error("no proxy on this host: demo data only");
-      const h = {};
-      for (const line of String(headers || "").split("\n")) {
-        const i = line.indexOf(":");
-        if (i > 0) h[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-      }
+    // Foundation's URLSession runs over the page's fetch (boot({ fetch })).
+    // Cloud provider APIs send no CORS headers, so every request goes through
+    // the dev server's /proxy, a dumb pass-through: all signing and auth
+    // headers are made by the Swift app. Off the dev server nothing is sent
+    // anywhere (a hosted copy is demo-only).
+    const NULL_BODY = new Set([101, 204, 205, 304]);
+    const proxyFetch = async (input, init) => {
+      if (!hasBridge) throw new TypeError("no proxy on this host: demo data only");
+      const request = new Request(input, init);
+      const headers = {};
+      request.headers.forEach((value, name) => { headers[name] = value; });
+      const body = request.method === "GET" || request.method === "HEAD" ? "" : await request.text();
       const response = await fetch("/proxy", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method: method || "GET", url, headers: h, body: body && body.length ? decoder.decode(body) : "" }),
+        body: JSON.stringify({ method: request.method, url: request.url, headers, body }),
       });
       const { status, body: text } = await response.json();
-      if (!status) throw new Error("transport failure");
-      const head = encoder.encode(status + "\n\n\n");
-      const bytes = encoder.encode(text || "");
-      const out = new Uint8Array(head.length + bytes.length);
-      out.set(head, 0); out.set(bytes, head.length);
-      return out;
+      if (!status) throw new TypeError("transport failure");
+      return new Response(NULL_BODY.has(status) ? null : (text || ""), { status });
     };
     const dependencies = {
-      networking: Dependencies.networkService(() => ({
-        async request(url, method) {
-          const raw = await performViaProxy(url, method, "", null);
-          const text = decoder.decode(raw); const status = parseInt(text, 10);
-          if (status < 200 || status >= 300) throw new Error("HTTP " + status);
-          return raw.subarray(text.indexOf("\n\n") + 2);
-        },
-        async send(url, method, headers, body) {
-          const raw = await performViaProxy(url, method, headers, body);
-          const text = decoder.decode(raw); const status = parseInt(text, 10);
-          if (status < 200 || status >= 300) throw new Error("HTTP " + status);
-          return raw.subarray(text.indexOf("\n\n") + 2);
-        },
-        perform: performViaProxy,
-      })),
       keychain: Dependencies.keychainService(() => ({
         async get(key) {
           const { found, value } = await secure("get", key);
@@ -126,29 +107,26 @@
       })),
     };
 
-    // Dev hooks for headless smoke tests: seed FileService-backed
-    // localStorage before the app boots.
-    //   ?seedcreds=<URI-encoded JSON>       (the overcast_credentials.json body)
-    //   ?seedfile=<name>:<URI-encoded body> (any FileService file, e.g. a cache entry)
+    // Dev hook for headless smoke tests: ?seedcreds=<URI-encoded JSON>
+    // ({ "<provider>": { credential fields } }) saves credentials into the
+    // Keychain bridge before the app boots, where the app restores them from.
     {
-      const params = new URLSearchParams(location.search);
-      const seed = params.get("seedcreds");
-      if (seed) {
-        try { localStorage.setItem("overcast_credentials.json", seed); }
-        catch (err) { console.warn("[seedcreds]", err); }
-      }
-      const file = params.get("seedfile");
-      if (file) {
-        const mark = file.indexOf(":");
-        try { localStorage.setItem(file.slice(0, mark), file.slice(mark + 1)); }
-        catch (err) { console.warn("[seedfile]", err); }
+      const seed = new URLSearchParams(location.search).get("seedcreds");
+      if (seed && hasBridge) {
+        try {
+          for (const [provider, fields] of Object.entries(JSON.parse(seed))) {
+            await secure("set", "credentials." + provider, JSON.stringify(fields));
+          }
+        } catch (err) { console.warn("[seedcreds]", err); }
       }
     }
 
     boot({
       canvas: document.getElementById("canvas"),
-      wasmURL: "./app.wasm?v=702497478",
+      wasmURL: "./app.wasm?v=1388700582",
       rendererName: new URLSearchParams(location.search).get("renderer") || "react",
+      bundleIdentifier: "com.LoganShire.Overcast",
+      fetch: proxyFetch,
       dependencies,
     }).then((result) => {
       bridge = result.bridge;
