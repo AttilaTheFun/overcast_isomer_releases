@@ -16,11 +16,11 @@
 <body>
   <canvas id="canvas"></canvas>
   <!-- React 18 UMD globals for the ReactRenderer (?renderer=react). -->
-  <script src="./runtime/react.production.min.js?v=541805837"></script>
-  <script src="./runtime/react-dom.production.min.js?v=541805837"></script>
+  <script src="./runtime/react.production.min.js?v=702497478"></script>
+  <script src="./runtime/react-dom.production.min.js?v=702497478"></script>
   <script type="module">
-    import { boot } from "./runtime/boot.js?v=541805837";
-    import { Dependencies } from "./app_bridge.js?v=541805837";
+    import { boot } from "./runtime/boot.js?v=702497478";
+    import { Dependencies } from "./app_bridge.js?v=702497478";
 
     // Host-side dependency injection: the app's HTTPService. Cloud provider
     // APIs don't send CORS headers, so requests route through the dev
@@ -147,7 +147,7 @@
 
     boot({
       canvas: document.getElementById("canvas"),
-      wasmURL: "./app.wasm?v=541805837",
+      wasmURL: "./app.wasm?v=702497478",
       rendererName: new URLSearchParams(location.search).get("renderer") || "react",
       dependencies,
     }).then((result) => {
@@ -195,13 +195,13 @@
         setTimeout(() => openNext(0), 250);
         // Headless throttles requestAnimationFrame — pump frames so async
         // completions re-render before the screenshot.
-        const pump = setInterval(() => bridge.uuiRender(), 400);
+        const pump = setInterval(() => bridge.isoRender(), 400);
         setTimeout(() => clearInterval(pump), 45000);
       }
       const type = params.get("type");
       if (type) {
         setTimeout(() => {
-          const overlay = window.__uuiTextOverlay;
+          const overlay = window.__isoTextOverlay;
           if (overlay && overlay.style.display !== "none") {
             overlay.value = type;
             overlay.dispatchEvent(new Event("input"));
