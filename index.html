@@ -16,11 +16,11 @@
 <body>
   <canvas id="canvas"></canvas>
   <!-- React 18 UMD globals for the ReactRenderer (?renderer=react). -->
-  <script src="./runtime/react.production.min.js?v=309393578"></script>
-  <script src="./runtime/react-dom.production.min.js?v=309393578"></script>
+  <script src="./runtime/react.production.min.js?v=1133240669"></script>
+  <script src="./runtime/react-dom.production.min.js?v=1133240669"></script>
   <script type="module">
-    import { boot } from "./runtime/boot.js?v=309393578";
-    import { Dependencies } from "./app_bridge.js?v=309393578";
+    import { boot } from "./runtime/boot.js?v=1133240669";
+    import { Dependencies } from "./app_bridge.js?v=1133240669";
 
     // Host-side dependency injection: the app's HTTPService. Cloud provider
     // APIs don't send CORS headers, so requests route through the dev
@@ -123,7 +123,7 @@
 
     boot({
       canvas: document.getElementById("canvas"),
-      wasmURL: "./app.wasm?v=309393578",
+      wasmURL: "./app.wasm?v=1133240669",
       rendererName: new URLSearchParams(location.search).get("renderer") || "react",
       bundleIdentifier: "com.LoganShire.Overcast",
       fetch: proxyFetch,
